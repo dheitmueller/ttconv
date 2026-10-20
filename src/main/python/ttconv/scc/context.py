@@ -398,6 +398,20 @@ class SccContext:
         self.push_active_caption_to_model(time_code)
         self.new_buffered_caption()
 
+      elif self.has_active_caption() and not self.active_caption.is_empty():
+        new_depth = {SccControlCode.RU2: 2, SccControlCode.RU3: 3, SccControlCode.RU4: 4}[control_code]
+
+        if new_depth < self.roll_up_depth:
+          # The rows above the new depth are not displayed any more
+          cursor = self.active_caption.get_cursor()
+          remaining_lines = self.active_caption.copy_lines()
+          remaining_lines = dict(sorted(remaining_lines.items())[-new_depth:])
+          self.push_active_caption_to_model(time_code)
+          self.roll_up_depth = new_depth
+          self.new_active_caption(time_code, SccCaptionStyle.RollUp)
+          self.active_caption.set_lines(remaining_lines)
+          self.active_caption.set_cursor_at(cursor[0], cursor[1])
+
       # Start a new Roll-Up caption
       self.current_style = SccCaptionStyle.RollUp
 

@@ -2030,5 +2030,29 @@ Scenarist_SCC V1.0
     p_list = list(list(to_model(scc_content).get_body())[0])
     self.assertEqual(["Ab"], ["".join(list(span)[0].get_text() for span in p if isinstance(span, Span)) for p in p_list])
 
+  def test_scc_roll_up_depth_reduction_hides_the_rows_above(self):
+    # CTA-608-E C.4: with a depth of two only the last two rows are displayed
+    scc_content = """\
+Scenarist_SCC V1.0
+
+00:00:00:00	94a7 94a7 94ad 94ad 9470 9470 c180
+
+00:00:02:00	94ad 94ad 9470 9470 c280
+
+00:00:04:00	94ad 94ad 9470 9470 4380
+
+00:00:06:00	9425 9425
+
+00:00:08:00	942c 942c
+"""
+
+    doc = to_model(scc_content)
+
+    p_list = list(list(doc.get_body())[0])
+    texts = [["/" if isinstance(c, Br) else list(c)[0].get_text() for c in p] for p in p_list]
+    self.assertEqual(["A", "/", "B", "/", "C"], texts[-2])
+    self.assertEqual(["B", "/", "C"], texts[-1])
+    self.assertEqual(p_list[-2].get_end(), p_list[-1].get_begin())
+
 if __name__ == '__main__':
   unittest.main()
