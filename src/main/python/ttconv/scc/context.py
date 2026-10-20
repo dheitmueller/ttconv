@@ -300,6 +300,12 @@ class SccContext:
       LOGGER.warning("No current SCC caption nor content initialized")
       return
 
+    # The code is preceded by a standard space and carries an automatic backspace: it takes the cell of that
+    # space and is displayed as a space (CTA-608-E 6.2)
+    takes_space = processed_caption.get_current_text().get_text().endswith(" ")
+    if takes_space:
+      self.backspace(time_code)
+
     if processed_caption.get_current_text().get_text():
       processed_caption.new_caption_text()
 
@@ -308,6 +314,10 @@ class SccContext:
     else:
       self.current_color = attribute_code.get_color()
       self.current_text_decoration = attribute_code.get_text_decoration()
+
+    if takes_space:
+      # the cell is shown as a space that has the attributes of the code
+      self.process_text(" ", time_code)
 
   def reset_current_char_styles(self):
     """Resets the current character styles to their defaults"""
