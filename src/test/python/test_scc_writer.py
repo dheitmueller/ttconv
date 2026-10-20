@@ -262,6 +262,57 @@ class SCCWriterTest(unittest.TestCase):
     self.assertEqual((NamedColors.red.value, True), (spans[1][1], spans[1][2].underline))
     self.assertEqual(FontStyleType.italic, spans[2][3])
 
+  def _region_doc(self, region: str, body: str) -> ContentDocument:
+    return imsc_reader.to_model(et.ElementTree(et.fromstring(f"""<tt xml:lang="en" xmlns="http://www.w3.org/ns/ttml"
+    xmlns:tts="http://www.w3.org/ns/ttml#styling" xmlns:ttp="http://www.w3.org/ns/ttml#parameter"
+    ttp:frameRate="30" ttp:frameRateMultiplier="1000 1001">
+  <head><layout>{region}</layout></head>
+  <body><div>{body}</div></body>
+</tt>""")))
+
+  def test_pop_on_position_of_the_region(self):
+    # The row and the column of a caption are those of its region (CTA-608-E 6.1, Table 53): the 32 columns and 15 rows are
+    # the safe area, 80% of the picture in the 40 by 19 cells of ttconv. Here the third cell row (row 5 is at 31.58%) and
+    # the 8th cell (the 4th column, 20%): the PAC of row 5 with an indent of 4.
+    model = self._region_doc("""<region xml:id="r" tts:origin="20% 31.58%" tts:extent="40% 10.53%" tts:displayAlign="before"/>""",
+                             """<p region="r" begin="30f" end="90f">Hi</p>""")
+
+    self.assertEqual("""Scenarist_SCC V1.0
+
+00:00:00;23	9420 9420 94ae 94ae 1552 1552 c8e9 942f 942f
+
+00:00:03;00	942c 942c""", scc_writer.from_model(model))
+
+  def test_pop_on_position_of_a_region_aligned_after(self):
+    # the last line is on the last row of the region: rows 11 and 12 of a region that ends below row 12, at the 12th column
+    model = self._region_doc("""<region xml:id="r" tts:origin="30% 63.16%" tts:extent="40% 10.53%" tts:displayAlign="after"/>""",
+                             """<p region="r" begin="30f" end="90f">a<br/>b</p>""")
+
+    self.assertEqual("""Scenarist_SCC V1.0
+
+00:00:00;20	9420 9420 94ae 94ae 1054 1054 6180 1354 1354 6280 942f 942f
+
+00:00:03;00	942c 942c""", scc_writer.from_model(model))
+
+  def test_roll_up_base_row_of_the_region(self):
+    # the base row of the roll-up caption is the last row of its region (CTA-608-E C.7), here row 5
+    scc = """Scenarist_SCC V1.0
+
+00:00:00;00	9426 9426 94ad 94ad 1540 1540 c180
+
+00:00:02;00	9426 9426 94ad 94ad 1540 1540 c280
+
+00:00:04;00	942c 942c
+"""
+
+    self.assertEqual("""Scenarist_SCC V1.0
+
+00:00:00;00	94a7 94a7 94ad 94ad 15d0 15d0 c180
+
+00:00:02;00	94a7 94a7 94ad 94ad 15d0 15d0 c280
+
+00:00:04;00	942c 942c""", scc_writer.from_model(scc_reader.to_model(scc)))
+
   def test_pop_on_centered(self):
     ttml_doc_str = """<?xml version="1.0" encoding="UTF-8"?>
 <tt xml:lang="en" xmlns="http://www.w3.org/ns/ttml"
@@ -541,11 +592,11 @@ Line 3
   def test_multi_regions(self):
     expected_scc="""Scenarist_SCC V1.0
 
-00:00:00;22	9420 9420 94ae 94ae 9440 9440 6180 942f 942f
+00:00:00;22	9420 9420 94ae 94ae 9140 9140 6180 942f 942f
 
 00:00:01;29	942c 942c
 
-00:00:02;22	9420 9420 94ae 94ae 9440 9440 6280 942f 942f
+00:00:02;22	9420 9420 94ae 94ae 9758 9758 6280 942f 942f
 
 00:00:03;29	942c 942c"""
 

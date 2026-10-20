@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from enum import Enum
 import logging
+import math
 from fractions import Fraction
 import re
 from typing import List, Optional, Sequence
@@ -38,7 +39,7 @@ from ttconv.isd import ISD
 from ttconv.scc.codes.characters import unicode_to_scc
 from ttconv.scc.codes.preambles_address_codes import SccPreambleAddressCode
 from ttconv.scc.config import SccWriterConfiguration
-from ttconv.style_properties import StyleProperties, NamedColors, TextAlignType, FontStyleType, ColorType
+from ttconv.style_properties import StyleProperties, NamedColors, TextAlignType, FontStyleType, ColorType, DisplayAlignType, LengthType
 from ttconv.scc.codes.control_codes import SccControlCode
 from ttconv.scc.codes.mid_row_codes import SccMidRowCode
 from ttconv.time_code import FPS_29_97, FPS_30, SmpteTimeCode
@@ -79,6 +80,67 @@ def _mid_row_code(style: tuple) -> int:
   base = 0x112E if italic else 0x1120 + 2 * color
   return base + (1 if underline else 0)
 
+# The 15 rows and 32 columns of CEA-608 are the safe area, which is 80% of the root area, in the 40 by 19 cell grid that the SCC
+# reader writes (ttconv.scc.reader): the 32 columns start at the 5th cell, the 15 rows at the 3rd
+_ROOT_COLUMNS = 40
+_ROOT_ROWS = 19
+_FIRST_COLUMN_CELL = 4
+_FIRST_ROW_CELL = 2
+_ROWS = 15
+
+class _Position:
+  """Region of a caption, in percentages of the root container"""
+
+  def __init__(self, x: float, y: float, width: float, height: float, display_align: DisplayAlignType):
+    self.x = x
+    self.y = y
+    self.width = width
+    self.height = height
+    self.display_align = display_align
+
+  def get_column(self) -> int:
+    """The column (starting at 0) of the left of the region"""
+    return min(max(round(self.x * _ROOT_COLUMNS / 100) - _FIRST_COLUMN_CELL, 0), 31)
+
+  def get_width(self) -> int:
+    """The width of the region in columns"""
+    return min(max(round(self.width * _ROOT_COLUMNS / 100), 1), 32)
+
+  def get_rows(self, nb_lines: int) -> int:
+    """The row of the first of lines, which are laid out in the region (a line is a row of the grid)"""
+    top = round(self.y * _ROOT_ROWS / 100) - _FIRST_ROW_CELL + 1
+    bottom = round((self.y + self.height) * _ROOT_ROWS / 100) - _FIRST_ROW_CELL
+
+    if self.display_align is DisplayAlignType.after:
+      first = bottom - nb_lines + 1
+    elif self.display_align is DisplayAlignType.center:
+      first = top + (bottom - top + 1 - nb_lines) // 2
+    else:
+      first = top
+
+    return min(max(first, 1), max(_ROWS - nb_lines + 1, 1))
+
+  def get_last_row(self, nb_lines: int) -> int:
+    """The row of the last of lines, which are laid out in the region"""
+    return min(self.get_rows(nb_lines) + nb_lines - 1, _ROWS)
+
+def _position_of(region: model.Region) -> Optional[_Position]:
+  """The position of a region of an ISD, unless it is the default region or has no usable position"""
+  if region.get_id() == ISD.DEFAULT_REGION_ID:
+    return None
+
+  origin = region.get_style(StyleProperties.Origin)
+  extent = region.get_style(StyleProperties.Extent)
+  if origin is None or extent is None:
+    return None
+
+  if any(v.units is not LengthType.Units.rw for v in (origin.x, extent.width)) or \
+     any(v.units is not LengthType.Units.rh for v in (origin.y, extent.height)):
+    return None
+
+  return _Position(origin.x.value, origin.y.value, extent.width.value, extent.height.value,
+                   region.get_style(StyleProperties.DisplayAlign))
+
 class _Caption:
   """Collection of lines of text with a begin and end time and an alignment"""
 
@@ -88,6 +150,7 @@ class _Caption:
     self._lines: List[str] = []
     self._styles: List[List[tuple]] = []  # the style of every character of every line
     self._alignment: TextAlignType = TextAlignType.start
+    self._position: Optional[_Position] = None
 
   def set_begin(self, begin: Fraction):
     """Sets the begin time of the lines"""
@@ -117,6 +180,14 @@ class _Caption:
     """Sets the lines of text (without styles)"""
     self._lines = lines
     self._styles = [[_DEFAULT_STYLE] * len(line) for line in lines]
+
+  def set_position(self, position: Optional[_Position]):
+    """Sets the position of the region of the lines"""
+    self._position = position
+
+  def get_position(self) -> Optional[_Position]:
+    """Returns the position of the region of the lines, None if it has none"""
+    return self._position
 
   def get_styles(self, index: int) -> List[tuple]:
     """Returns the style of every character of a line"""
@@ -289,6 +360,38 @@ class _Chunk:
 
 MAX_LINEWIDTH = 32
 
+def _line_indent(caption: _Caption, line: str, align: bool = True) -> tuple:
+  """Returns the indent of the PAC and the number of spaces that move the first character of a line to its column. The column is
+  the one of the region of the caption, plus the alignment of the text in it, or the alignment in the 32 columns when
+  the caption has no position"""
+  position = caption.get_position()
+  alignment = caption.get_alignment() if align else TextAlignType.start
+
+  if position is None:
+    if alignment == TextAlignType.center:
+      column = (32 - len(line)) // 2
+    elif alignment == TextAlignType.end:
+      column = 32 - len(line)
+    else:
+      return None, 0
+
+    return 4 * (column // 4), column % 4
+
+  if alignment == TextAlignType.center:
+    center = position.get_column() + position.get_width() / 2
+    if abs(center - 16) <= 1:
+      # a caption centered on the screen: the convention of the encoders, that the rounding of the region does not blur
+      column = (32 - len(line)) // 2
+    else:
+      column = math.floor(center - len(line) / 2 + 0.5)
+  elif alignment == TextAlignType.end:
+    column = position.get_column() + position.get_width() - len(line)
+  else:
+    column = position.get_column()
+
+  column = min(max(column, 0), max(32 - len(line), 0))
+  return (4 * (column // 4) if column > 0 else None), column % 4
+
 def _push_chars(chunk: _Chunk, text: str, styles: List[tuple], previous_style: tuple):
   """Pushes characters, with the mid-row codes that change the style. A mid-row code is displayed as a space and takes a
   column: it replaces the space where the style changes (the space that precedes the characters of the new style or the
@@ -404,11 +507,15 @@ def _process_as_rollup(captions, config, progress_callback) -> List[_Chunk]:
         # the caption begins when the CR code is received
         begin_f = begin_f - ru_chunk.get_dur()
         ru_chunk.push_control_code(SccControlCode.CR.get_ch1_value())
-        # The base row of the roll-up caption is always row 15 (CTA-608-E C.15), which is also what the TeleCaption I and II
-        # decoders display whatever the row of the PAC (B.5).
-        # TODO: a movable base row, or a caption on rows 5-11, needs PACs that TeleCaption decoders do not recognize. If you
-        # care about these decoders, see the alternate-row scheme for mid-screen PACs (CTA-608-E B.2.2). Patches welcome.
-        _push_line(ru_chunk, 15, 0, 0, line, caption.get_styles(line_index))
+        # The base row of the roll-up caption is the last row of its region, row 15 without a region (CTA-608-E C.7, C.15).
+        # TODO: the TeleCaption I and II decoders do not recognize the PACs for the mid-screen rows 5-11 (B.2, B.5), they
+        # display the caption on row 15. If you care about these decoders, see the alternate-row scheme for mid-screen PACs
+        # (CTA-608-E B.2.2). Patches welcome.
+        position = caption.get_position()
+        base_row = max(position.get_last_row(len(caption)), config.rollup_lines) if position is not None else 15
+        # the rows of a roll-up caption start at the column of the region, whatever the alignment of the text
+        indent, spaces = _line_indent(caption, line, False) if position is not None else (0, 0)
+        _push_line(ru_chunk, base_row, indent or 0, spaces, line, caption.get_styles(line_index))
 
         if len(chunks) > 0 and begin_f < chunks[-1].get_end():
           begin_f = chunks[-1].get_end()
@@ -438,22 +545,14 @@ def _process_as_popon(captions, config, progress_callback) -> List[_Chunk]:
 
     enm_chunk.push_control_code(SccControlCode.RCL.get_ch1_value())
     enm_chunk.push_control_code(SccControlCode.ENM.get_ch1_value())
-    # The rows of the caption are the bottom rows of the screen, so no PAC is for the mid-screen rows 5-11 that the
-    # TeleCaption I and II decoders do not recognize (CTA-608-E B.2) as long as a caption has at most 4 rows.
-    # TODO: positioning a caption on the mid-screen rows would need the alternate-row scheme for mid-screen PACs
-    # (CTA-608-E B.2.2) to stay readable on these decoders. Patches welcome.
-    for index, (line_num, line) in enumerate(enumerate(caption, 15 - len(caption))):
-      if caption.get_alignment() == TextAlignType.center:
-        indent = (32 - len(line)) // 2
-      elif caption.get_alignment() == TextAlignType.end:
-        indent = 32 - len(line)
-      else:
-        indent = None
-
-      spaces = indent % 4 if indent is not None else 0
-      indent = 4 * (indent // 4) if indent is not None else None
-
-      _push_line(enm_chunk, line_num, indent, spaces, line, caption.get_styles(index))
+    # The rows of the caption are those of its region, the bottom rows of the screen without one.
+    # TODO: the TeleCaption I and II decoders do not recognize the PACs for the mid-screen rows 5-11 (CTA-608-E B.2), the
+    # alternate-row scheme for mid-screen PACs (B.2.2) keeps a caption readable on these decoders. Patches welcome.
+    position = caption.get_position()
+    first_row = position.get_rows(len(caption)) if position is not None else 15 - len(caption)
+    for index, line in enumerate(caption):
+      indent, spaces = _line_indent(caption, line)
+      _push_line(enm_chunk, first_row + index, indent, spaces, line, caption.get_styles(index))
     enm_chunk.push_control_code(SccControlCode.EOC.get_ch1_value())
 
     enm_chunk.set_begin(int(caption.get_begin() * config.frame_rate.fps - enm_chunk.get_dur() + 2))
@@ -517,6 +616,7 @@ def from_model(doc: model.ContentDocument, config: Optional[SccWriterConfigurati
 
     caption: _Caption = _Caption.from_regions(list(isd.iter_regions()))
     caption.set_begin(begin)
+    caption.set_position(next((_position_of(r) for r in isd.iter_regions() if len(r) > 0), None))
 
     if len(caption) == 0:
       # skip ISD with no text
