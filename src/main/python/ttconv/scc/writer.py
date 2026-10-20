@@ -73,13 +73,20 @@ def _to_cc608_text(text: str) -> str:
 
   return "".join(result)
 
-# The foreground colors of CEA-608 (CTA-608-E 6.2), in the order of the mid-row codes
+# The colors of CEA-608 (CTA-608-E 6.2), in the order of the mid-row codes and of the background attribute codes; the last one,
+# black, is only a foreground color through the Foreground Black attribute codes and a background color through the Background
+# Black codes
 _COLORS = [NamedColors.white, NamedColors.green, NamedColors.blue, NamedColors.cyan, NamedColors.red, NamedColors.yellow,
-           NamedColors.magenta]
-_RGB_COLORS = [(255, 255, 255), (0, 255, 0), (0, 0, 255), (0, 255, 255), (255, 0, 0), (255, 255, 0), (255, 0, 255)]
+           NamedColors.magenta, NamedColors.black]
+_RGB_COLORS = [(255, 255, 255), (0, 255, 0), (0, 0, 255), (0, 255, 255), (255, 0, 0), (255, 255, 0), (255, 0, 255), (0, 0, 0)]
+_BLACK = 7
 
-# (color index, italic, underline) of a character; italics are white italics in CEA-608
-_DEFAULT_STYLE = (0, False, False)
+# The background of a character: (color index, 'o'paque or 's'emi-transparent), or transparent. The default of CEA-608 is opaque black
+_DEFAULT_BACKGROUND = (_BLACK, "o")
+_TRANSPARENT = (_BLACK, "t")
+
+# (color index, italic, underline, background) of a character; italics are white italics in CEA-608
+_DEFAULT_STYLE = (0, False, False, _DEFAULT_BACKGROUND)
 
 def _closest_color_index(color: Optional[ColorType]) -> int:
   """Returns the index in _COLORS of the CEA-608 color that is the closest to the color"""
@@ -89,7 +96,7 @@ def _closest_color_index(color: Optional[ColorType]) -> int:
   return min(range(len(_RGB_COLORS)), key=lambda i: sum((a - b) ** 2 for a, b in zip(rgb, _RGB_COLORS[i])))
 
 def _style_of(element: model.Span) -> tuple:
-  """Returns the CEA-608 style (color index, italic, underline) of the content of an element"""
+  """Returns the CEA-608 style (color index, italic, underline, background) of the content of an element"""
   color = _closest_color_index(element.get_style(StyleProperties.Color))
   italic = element.get_style(StyleProperties.FontStyle) in (FontStyleType.italic, FontStyleType.oblique)
   decoration = element.get_style(StyleProperties.TextDecoration)
@@ -99,11 +106,24 @@ def _style_of(element: model.Span) -> tuple:
     # italics are white in CEA-608: the color wins
     italic = False
 
-  return (color, italic, underline)
+  background = element.get_style(StyleProperties.BackgroundColor)
+  if background is None or background.components[3] == 0:
+    background = _TRANSPARENT
+  else:
+    background = (_closest_color_index(background), "s" if background.components[3] < 192 else "o")
+
+  return (color, italic, underline, background)
+
+def _effective_style(style: tuple) -> tuple:
+  """The style that CEA-608 can give to a character: a transparent background is the default one, as a transparent background
+  is what the content of a caption has when its author did not give it one (a background that is not opaque is not written
+  as a Background Transparent code, which would take a column)"""
+  color, italic, underline, background = style
+  return (color, italic, underline, _DEFAULT_BACKGROUND if background == _TRANSPARENT else background)
 
 def _mid_row_code(style: tuple) -> int:
-  """Returns the mid-row code (channel 1) that sets the style"""
-  color, italic, underline = style
+  """Returns the mid-row code (channel 1) that sets the color, italics and underline of a style"""
+  color, italic, underline = style[:3]
   base = 0x112E if italic else 0x1120 + 2 * color
   return base + (1 if underline else 0)
 
@@ -420,52 +440,124 @@ def _line_indent(caption: _Caption, line: str, align: bool = True) -> tuple:
   column = min(max(column, 0), max(32 - len(line), 0))
   return (4 * (column // 4) if column > 0 else None), column % 4
 
-def _push_chars(chunk: _Chunk, text: str, styles: List[tuple], previous_style: tuple):
-  """Pushes characters, with the mid-row codes that change the style. A mid-row code is displayed as a space and takes a
-  column: it replaces the space where the style changes (the space that precedes the characters of the new style or the
-  first space of them), otherwise it is an additional column"""
-  for i, (c, style) in enumerate(zip(text, styles)):
-    if c == " " and i + 1 < len(text) and styles[i + 1] != style and styles[i + 1] != previous_style:
-      # the cell of this space is the mid-row code of the style that follows
-      chunk.push_control_code(_mid_row_code(styles[i + 1]))
-      previous_style = styles[i + 1]
-      continue
+def _split_column(column: int) -> tuple:
+  """Returns the indent of the PAC and the number of spaces that move the cursor to a column"""
+  return (4 * (column // 4) if column > 0 else None), column % 4
 
-    if style != previous_style:
-      chunk.push_control_code(_mid_row_code(style))
-      previous_style = style
+def _push_transition(chunk: _Chunk, previous: tuple, style: tuple):
+  """Pushes the codes that change the style of the characters that follow. They take the column of a space: a mid-row code is
+  displayed as a space, and the attribute codes (background, foreground black) are sent after a standard space that they
+  replace (CTA-608-E 6.2)"""
+  foreground_changes = style[:3] != previous[:3]
+
+  if foreground_changes and style[0] != _BLACK:
+    chunk.push_control_code(_mid_row_code(style))
+  else:
+    chunk.push_char(" ")
+
+  if style[3] != previous[3]:
+    color, opacity = style[3]
+    chunk.push_control_code(0x1020 + 2 * color + (1 if opacity == "s" else 0))
+
+  if foreground_changes and style[0] == _BLACK:
+    chunk.push_control_code(0x172E + (1 if style[2] else 0))
+
+def _push_jump(chunk: _Chunk, row: int, column: int):
+  """Moves the cursor to a column of the row: a PAC for the row with an indent, and a tab offset for the rest. The cells that
+  are jumped over stay empty (CTA-608-E C.7)"""
+  indent = 4 * (column // 4)
+  pac = SccPreambleAddressCode(1, row, NamedColors.white.value, indent, False, False)
+  chunk.push_control_code(pac.get_ch1_packet())
+  if column > indent:
+    chunk.push_control_code((SccControlCode.TO1, SccControlCode.TO2, SccControlCode.TO3)[column - indent - 1].get_ch1_value())
+
+def _push_chars(chunk: _Chunk, text: str, styles: List[tuple], previous: tuple, column: Optional[int] = None, row: int = 15):
+  """Pushes characters, with the codes that change the style. Such a code takes the column of a space: it takes the one of
+  the space where the style changes (the space that precedes the characters of the new style, or the first space of them),
+  otherwise it is an additional column. A run of spaces with a transparent background between characters that have another
+  background is a gap: the cursor jumps over it (if the column is known), as the cells of the gap are empty"""
+  i = 0
+  while i < len(text):
+    c = text[i]
+
+    if column is not None and c == " " and styles[i][3] == _TRANSPARENT and i > 0:
+      j = i
+      while j < len(text) and text[j] == " " and styles[j][3] == _TRANSPARENT:
+        j += 1
+
+      if j < len(text) and styles[i - 1][3] != _TRANSPARENT and styles[j][3] != _TRANSPARENT:
+        column += j - i
+        _push_jump(chunk, row, column)
+        previous = _DEFAULT_STYLE    # a PAC sets the default attributes
+        i = j
+        continue
+
+    style = _effective_style(styles[i])
+    if c == " " and i + 1 < len(text) and _effective_style(styles[i + 1]) != style and text[i + 1] != " ":
+      style = _effective_style(styles[i + 1])
+
+    if style != previous:
+      _push_transition(chunk, previous, style)
+      previous = style
+      if column is not None:
+        column += 1
       if c == " ":
+        i += 1
         continue
 
     chunk.push_char(c)
+    if column is not None:
+      column += 1
+    i += 1
 
 def _push_line(chunk: _Chunk, row: int, indent: Optional[int], spaces: int, text: str, styles: List[tuple]):
   """Pushes a PAC for the row, the spaces that move the first character to its column, and the text with its styles"""
-  style = styles[0] if len(text) > 0 else _DEFAULT_STYLE
   column = (indent or 0) + spaces
 
-  if style == _DEFAULT_STYLE:
+  # The cells before and after the text that have a transparent background and are followed or preceded by a character with
+  # another one are padding: the indent replaces them
+  start = 0
+  while start < len(text) and text[start] == " " and styles[start][3] == _TRANSPARENT:
+    start += 1
+  if 0 < start < len(text) and styles[start][3] != _TRANSPARENT:
+    text, styles = text[start:], styles[start:]
+    column += start
+    indent, spaces = _split_column(column)
+
+  end = len(text)
+  while end > 0 and text[end - 1] == " " and styles[end - 1][3] == _TRANSPARENT:
+    end -= 1
+  if 0 < end < len(text) and styles[end - 1][3] != _TRANSPARENT:
+    text, styles = text[:end], styles[:end]
+
+  first = _effective_style(styles[0]) if len(text) > 0 else _DEFAULT_STYLE
+
+  if first == _DEFAULT_STYLE:
     pac = SccPreambleAddressCode(1, row, NamedColors.white.value, indent, False, False)
     chunk.push_control_code(pac.get_ch1_packet())
     for _ in range(spaces):
       chunk.push_char(" ")
+    previous = _DEFAULT_STYLE
 
   elif column == 0:
     # the PACs without an indent have a color, italics and underline
-    color, italic, underline = style
-    pac = SccPreambleAddressCode(1, row, _COLORS[color].value, None, italic, underline)
+    color, italic, underline = first[:3]
+    pac = SccPreambleAddressCode(1, row, _COLORS[color].value if color != _BLACK else NamedColors.white.value, None,
+                                 italic, underline)
     chunk.push_control_code(pac.get_ch1_packet())
+    previous = (color if color != _BLACK else 0, italic, underline, _DEFAULT_BACKGROUND)
 
   else:
-    # a mid-row code, that takes the column before the first character, sets the style
+    # the codes that set the style take the column before the first character
     base = 4 * ((column - 1) // 4)
     pac = SccPreambleAddressCode(1, row, NamedColors.white.value, base, False, False)
     chunk.push_control_code(pac.get_ch1_packet())
     for _ in range(column - 1 - base):
       chunk.push_char(" ")
-    chunk.push_control_code(_mid_row_code(style))
+    _push_transition(chunk, _DEFAULT_STYLE, first)
+    previous = first
 
-  _push_chars(chunk, text, styles, style)
+  _push_chars(chunk, text, styles, previous, column, row)
 
 class _RollupKind(Enum):
   START = 0
@@ -515,7 +607,7 @@ def _process_as_rollup(captions, config, progress_callback) -> List[_Chunk]:
     if kind is _RollupKind.PAINT_ON:
       ru_chunk.set_begin(begin_f)
       shown = len(captions[i - 1][-1])
-      previous_style = caption.get_styles(-1)[shown - 1] if shown > 0 else _DEFAULT_STYLE
+      previous_style = _effective_style(caption.get_styles(-1)[shown - 1]) if shown > 0 else _DEFAULT_STYLE
       _push_chars(ru_chunk, caption[-1][shown:], caption.get_styles(-1)[shown:], previous_style)
     else:
       # determine the first line to be emitted

@@ -47,7 +47,7 @@ import ttconv.srt.reader as srt_reader
 
 from ttconv.scc.config import SCCFrameRate, SccWriterConfiguration
 from ttconv.model import ContentDocument, Region, Body, Div, P, Span, Text, ContentElement
-from ttconv.style_properties import StyleProperties, DisplayType, NamedColors, FontStyleType
+from ttconv.style_properties import StyleProperties, DisplayType, NamedColors, FontStyleType, ColorType
 
 class SccWriterConfigurationTest(unittest.TestCase):
 
@@ -341,6 +341,50 @@ class SCCWriterTest(unittest.TestCase):
     doc = scc_reader.to_model(scc_from_model)
     text = "".join(list(span)[0].get_text() for span in list(list(doc.get_body())[0])[0] if isinstance(span, Span))
     self.assertEqual("Zlutoucky - ae ... ' " + " " * 5, text)
+
+  def test_background_colors_and_black_text(self):
+    # CTA-608-E 6.2: a background attribute code, and the Foreground Black code, are sent after a standard space that they
+    # replace (automatic backspace): the cell of the space has the new attribute. Here a red background, then black text on
+    # white; the space between the spans, which has no background, is a gap that the cursor jumps over (a PAC)
+    model = self._region_doc("", """<p begin="30f" end="90f"><span tts:backgroundColor="#ff0000ff"> Opaque red</span> <span tts:color="#000000" tts:backgroundColor="#ffffff"> Black on white</span></p>""")
+
+    scc_from_model = scc_writer.from_model(model)
+    self.assertEqual("""Scenarist_SCC V1.0
+
+00:00:00;02	9420 9420 94ae 94ae 9440 9440 2080 10a8 10a8 4f70 61f1 75e5 20f2 e564 94d6 94d6 2080 1020 1020 97ae 97ae c2ec 61e3 6b20 ef6e 20f7 68e9 f4e5 942f 942f
+
+00:00:03;00	942c 942c""", scc_from_model)
+
+    # what a decoder shows
+    doc = scc_reader.to_model(scc_from_model)
+    spans = [(list(span)[0].get_text(), span.get_style(StyleProperties.Color), span.get_style(StyleProperties.BackgroundColor))
+             for span in list(list(doc.get_body())[0])[0] if isinstance(span, Span)]
+    self.assertEqual([" Opaque red", " ", " Black on white"], [span[0] for span in spans])
+    self.assertEqual(ColorType((255, 0, 0, 255)), spans[0][2])
+    self.assertEqual((NamedColors.black.value, ColorType((255, 255, 255, 255))), (spans[2][1], spans[2][2]))
+
+  def test_gap_between_two_texts(self):
+    # spaces with a transparent background between characters that have a black one are a gap: the cursor jumps over it
+    # with a PAC for the same row (CTA-608-E C.7), the cells stay empty
+    model = self._region_doc("""<region xml:id="r" tts:origin="10% 20%" tts:extent="80% 10%" tts:displayAlign="before" tts:textAlign="start"/>""",
+                             """<p region="r" begin="30f" end="90f" xml:space="preserve"><span tts:backgroundColor="#000000">A</span><span>   </span><span tts:backgroundColor="#000000">B</span></p>""")
+
+    self.assertEqual("""Scenarist_SCC V1.0
+
+00:00:00;20	9420 9420 94ae 94ae 9240 9240 c180 9252 9252 c280 942f 942f
+
+00:00:03;00	942c 942c""", scc_writer.from_model(model))
+
+  def test_transparent_padding_is_the_indent(self):
+    # spaces with a transparent background before or after the text are padding: the PAC of the row has the indent instead
+    model = self._region_doc("""<region xml:id="r" tts:origin="10% 20%" tts:extent="80% 10%" tts:displayAlign="before" tts:textAlign="start"/>""",
+                             """<p region="r" begin="30f" end="90f" xml:space="preserve"><span>    </span><span tts:backgroundColor="#000000">Hi</span><span>   </span></p>""")
+
+    self.assertEqual("""Scenarist_SCC V1.0
+
+00:00:00;23	9420 9420 94ae 94ae 9252 9252 c8e9 942f 942f
+
+00:00:03;00	942c 942c""", scc_writer.from_model(model))
 
   def test_pop_on_centered(self):
     ttml_doc_str = """<?xml version="1.0" encoding="UTF-8"?>
