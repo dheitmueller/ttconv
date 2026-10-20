@@ -313,6 +313,35 @@ class SCCWriterTest(unittest.TestCase):
 
 00:00:04;00	942c 942c""", scc_writer.from_model(scc_reader.to_model(scc)))
 
+  def test_characters_that_cea608_does_not_have(self):
+    # Best effort: a character that is not in the sets of CEA-608 is replaced by the plain characters that stand for it (the letter
+    # without an accent that the sets lack, a hyphen for a dash, three periods for an ellipsis, ...), otherwise by a space with
+    # a warning, once for each character of a conversion
+    ttml_doc_str = """<?xml version="1.0" encoding="UTF-8"?>
+<tt xml:lang="en" xmlns="http://www.w3.org/ns/ttml"
+    xmlns:ttp="http://www.w3.org/ns/ttml#parameter"
+    ttp:frameRate="30" ttp:frameRateMultiplier="1000 1001">
+  <body>
+    <div>
+      <p begin="30f" end="90f">\u017dlu\u0165ou\u010dk\u00fd \u2013 \u00e6 \u2026 \u2019 \u6f22\u6f22\u6f22\u2603\u2603</p>
+     </div>
+  </body>
+</tt>"""
+
+    model = imsc_reader.to_model(et.ElementTree(et.fromstring(ttml_doc_str)))
+
+    with self.assertLogs("ttconv.scc.writer", level="WARNING") as logs:
+      scc_from_model = scc_writer.from_model(model, SccWriterConfiguration())
+
+    # one warning for each of the two characters that have no equivalent, not one for each occurrence
+    self.assertEqual(2, len(logs.output))
+    self.assertEqual(1, len([log for log in logs.output if "U+6F22" in log]))
+    self.assertEqual(1, len([log for log in logs.output if "U+2603" in log]))
+
+    doc = scc_reader.to_model(scc_from_model)
+    text = "".join(list(span)[0].get_text() for span in list(list(doc.get_body())[0])[0] if isinstance(span, Span))
+    self.assertEqual("Zlutoucky - ae ... ' " + " " * 5, text)
+
   def test_pop_on_centered(self):
     ttml_doc_str = """<?xml version="1.0" encoding="UTF-8"?>
 <tt xml:lang="en" xmlns="http://www.w3.org/ns/ttml"

@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import typing
 import unicodedata
 
 from ttconv.scc.codes.extended_characters import SccExtendedCharacter
@@ -48,7 +49,12 @@ def _extended_character_fallback(c: str) -> int:
 
 def unicode_to_scc(c: str) -> bytes:
   """Convert a Unicode character to an SCC character string. An extended character is preceded by its fallback character,
-  which a decoder that has the extended sets replaces (it backs up one column)"""
+  which a decoder that has the extended sets replaces (it backs up one column). A character that is not in the sets of CEA-608
+  is a space"""
+  return unicode_to_scc_or_none(c) or b"\x20"
+
+def unicode_to_scc_or_none(c: str) -> typing.Optional[bytes]:
+  """Convert a Unicode character to an SCC character string, None if CEA-608 has no such character"""
 
   if len(c) != 1:
     raise ValueError("Can only convert a single character")
@@ -76,6 +82,33 @@ def unicode_to_scc(c: str) -> bytes:
         b.append(ext_c.get_ch1_value() % 256)
 
       else:
-        b.append(0x20)  # Standard
+        return None
 
   return b
+
+# Characters that are not in the sets of CEA-608 and have an obvious plain equivalent
+_TRANSLITERATIONS = {
+  "\u00A0": " ", "\u2002": " ", "\u2003": " ", "\u2009": " ", "\u202F": " ", "\t": " ", "\u200B": "", "\uFEFF": "",
+  "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2212": "-",
+  "\u2019": "'", "\u02BC": "'", "\u2032": "'", "\u201A": ",", "\u201E": "\"", "\u2033": "\"",
+  "\u2026": "...", "\u00D7": "x",
+  "\u00C6": "AE", "\u00E6": "ae", "\u0152": "OE", "\u0153": "oe", "\u0132": "IJ", "\u0133": "ij",
+  "\u0141": "L", "\u0142": "l", "\u0110": "D", "\u0111": "d", "\u00D0": "D", "\u00F0": "d", "\u0131": "i",
+}
+
+def transliterate_unicode(c: str) -> typing.Optional[str]:
+  """Returns plain characters of CEA-608 that stand for a character that CEA-608 does not have (a letter with an accent that
+  the sets lack is the letter, ligatures and typographic punctuation are spelled out), None if there is no obvious equivalent.
+
+  This is a best effort: CEA-608 is a small character set (the 112 characters of the basic set and the 64 optional extended
+  ones, CTA-608-E 6.4) and the standard does not say what an encoder does with the others, so not every text can be represented
+  and the result of a transliteration is not always what the author wrote."""
+  if c in _TRANSLITERATIONS:
+    return _TRANSLITERATIONS[c]
+
+  decomposed = unicodedata.normalize("NFD", c)
+  if len(decomposed) > 1 and decomposed[0].isascii() and all(unicodedata.combining(m) for m in decomposed[1:]):
+    return decomposed[0]
+
+  return None
+

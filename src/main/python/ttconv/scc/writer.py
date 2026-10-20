@@ -36,7 +36,7 @@ from typing import List, Optional, Sequence
 
 import ttconv.model as model
 from ttconv.isd import ISD
-from ttconv.scc.codes.characters import unicode_to_scc
+from ttconv.scc.codes.characters import unicode_to_scc, unicode_to_scc_or_none, transliterate_unicode
 from ttconv.scc.codes.preambles_address_codes import SccPreambleAddressCode
 from ttconv.scc.config import SccWriterConfiguration
 from ttconv.style_properties import StyleProperties, NamedColors, TextAlignType, FontStyleType, ColorType, DisplayAlignType, LengthType
@@ -45,6 +45,33 @@ from ttconv.scc.codes.mid_row_codes import SccMidRowCode
 from ttconv.time_code import FPS_29_97, FPS_30, SmpteTimeCode
 
 LOGGER = logging.getLogger(__name__)
+
+# The characters that are not in CEA-608 and for which a warning was logged since the conversion started (a stream can have
+# thousands of them and one warning for each would flood the log)
+_UNSUPPORTED_CHARACTERS_WARNED = set()
+
+def _to_cc608_text(text: str) -> str:
+  """Returns text that CEA-608 can represent. Best effort: CEA-608 has 176 characters and the standard says nothing about the
+  others, so a character that is not in the sets is replaced by plain characters that stand for it if there are obvious ones
+  (see ttconv.scc.codes.characters.transliterate_unicode), otherwise by a space, with a warning, once for each such character
+  of a conversion. Not every text can be represented."""
+  result = []
+  for c in text:
+    if unicode_to_scc_or_none(c) is not None:
+      result.append(c)
+      continue
+
+    replacement = transliterate_unicode(c)
+    if replacement is None:
+      replacement = " "
+      if c not in _UNSUPPORTED_CHARACTERS_WARNED:
+        _UNSUPPORTED_CHARACTERS_WARNED.add(c)
+        LOGGER.warning("The character %r (U+%04X) cannot be represented in CEA-608, it is replaced with a space (the other "
+                       "occurrences are replaced silently)", c, ord(c))
+
+    result.append(replacement)
+
+  return "".join(result)
 
 # The foreground colors of CEA-608 (CTA-608-E 6.2), in the order of the mid-row codes
 _COLORS = [NamedColors.white, NamedColors.green, NamedColors.blue, NamedColors.cyan, NamedColors.red, NamedColors.yellow,
@@ -211,6 +238,7 @@ class _Caption:
 
   def append_text(self, text: str, style: tuple):
     """Appends text with a style to the last line"""
+    text = _to_cc608_text(text)
     self._lines[-1] = self._lines[-1] + text
     self._styles[-1] = self._styles[-1] + [style] * len(text)
 
@@ -588,6 +616,7 @@ def from_model(doc: model.ContentDocument, config: Optional[SccWriterConfigurati
     progress_callback(progress / 2)
 
   config : SccWriterConfiguration = config if config is not None else SccWriterConfiguration()
+  _UNSUPPORTED_CHARACTERS_WARNED.clear()
   isds = ISD.generate_isd_sequence(doc, _isd_progress)
 
   # generate list of captions
