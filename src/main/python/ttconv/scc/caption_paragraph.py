@@ -31,7 +31,7 @@ import math
 from math import ceil
 from typing import Optional, List, Dict, Union
 
-from ttconv.model import Region, ContentDocument, P, Br, Span, Text
+from ttconv.model import Region, ContentDocument, P, Br, Span, Text, WhiteSpaceHandling
 from ttconv.scc.caption_line import SccCaptionLine
 from ttconv.scc.caption_style import SccCaptionStyle
 from ttconv.scc.caption_text import SccCaptionText
@@ -396,6 +396,7 @@ class SccCaptionParagraph:
     p = P()
     p.set_doc(doc)
     p.set_id(self._caption_id)
+    p.set_space(WhiteSpaceHandling.PRESERVE)
 
     if self._begin is not None:
       p.set_begin(self._begin.to_temporal_offset())
@@ -416,7 +417,9 @@ class SccCaptionParagraph:
 
       if last_row is not None:
         for _ in range(0, abs(last_row - row)):
-          p.push_child(Br(doc))
+          br = Br(doc)
+          br.set_space(WhiteSpaceHandling.PRESERVE)
+          p.push_child(br)
 
       last_row = row
 
@@ -424,6 +427,7 @@ class SccCaptionParagraph:
       if padding > 0 and not caption_line.is_empty():
         # Move the line to its column, the cells before it show nothing
         padding_span = Span(doc)
+        padding_span.set_space(WhiteSpaceHandling.PRESERVE)
         padding_span.set_style(StyleProperties.BackgroundColor, NamedColors.transparent.value)
         padding_span.push_child(Text(doc, " " * padding))
         p.push_child(padding_span)
@@ -435,6 +439,7 @@ class SccCaptionParagraph:
           continue
 
         span = Span(doc)
+        span.set_space(WhiteSpaceHandling.PRESERVE)
 
         if caption_text.get_begin() is not None:
 

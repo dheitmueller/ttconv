@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from ttconv.model import ContentDocument, Body, Div, CellResolutionType, ActiveAreaType
+from ttconv.model import ContentDocument, Body, Div, CellResolutionType, ActiveAreaType, WhiteSpaceHandling
 from ttconv.scc.caption_paragraph import SCC_SAFE_AREA_CELL_RESOLUTION_ROWS, \
   SCC_SAFE_AREA_CELL_RESOLUTION_COLUMNS, SCC_ROOT_CELL_RESOLUTION_ROWS, SCC_ROOT_CELL_RESOLUTION_COLUMNS
 from ttconv.scc.config import SccReaderConfiguration
@@ -72,6 +72,9 @@ def to_model(scc_content: str, config: Optional[SccReaderConfiguration] = None, 
   body.set_doc(document)
   document.set_body(body)
 
+  # the spaces of a row are cells: they are not collapsed or removed at the start of a line
+  body.set_space(WhiteSpaceHandling.PRESERVE)
+
   # the default value of LineHeight ("normal") typically translates to 125% of the font size, which causes regions to overflow.
   body.set_style(StyleProperties.LineHeight, LengthType(value=100, units=LengthType.Units.pct))
 
@@ -83,6 +86,7 @@ def to_model(scc_content: str, config: Optional[SccReaderConfiguration] = None, 
 
   context.div = Div()
   context.div.set_doc(document)
+  context.div.set_space(WhiteSpaceHandling.PRESERVE)
   body.push_child(context.div)
 
   lines = scc_content.splitlines()

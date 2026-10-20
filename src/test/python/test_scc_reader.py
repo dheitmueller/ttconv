@@ -33,7 +33,7 @@ from typing import Union, Type, Optional
 
 from ttconv import model
 from ttconv.isd import ISD
-from ttconv.model import Br, P, ContentElement, CellResolutionType, Span
+from ttconv.model import Br, P, ContentElement, CellResolutionType, Span, WhiteSpaceHandling
 from ttconv.scc.codes.attribute_codes import SccAttributeCode
 from ttconv.scc.config import SccReaderConfiguration
 from ttconv.scc.reader import to_model, to_disassembly
@@ -1637,6 +1637,22 @@ Scenarist_SCC V1.0
 
     p_list = list(list(doc.get_body())[0])
     self.assertEqual(16, p_list[0].get_region().get_style(StyleProperties.Extent).height.value)     # 3 of 19 rows
+
+
+  def test_scc_spaces_are_preserved(self):
+    # the spaces of a row are cells: a renderer must not collapse them or remove the ones that start a line
+    scc_content = """\
+Scenarist_SCC V1.0
+
+00:00:00:00	9420 9420 94ae 94ae 1540 1540 c1a0 20c2 1540 1540 1554 1554 c3a0 942f 942f
+"""
+
+    doc = to_model(scc_content)
+
+    self.assertEqual(WhiteSpaceHandling.PRESERVE, doc.get_body().get_space())
+    p_list = list(list(doc.get_body())[0])
+    for element in [p_list[0]] + list(p_list[0]):
+      self.assertEqual(WhiteSpaceHandling.PRESERVE, element.get_space(), element)
 
 
   def test_scc_roll_up_blank_row_rolls_up_the_rows_above(self):
