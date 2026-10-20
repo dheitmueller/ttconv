@@ -46,6 +46,9 @@ from ttconv.time_code import SmpteTimeCode, FPS_29_97
 
 ROLL_UP_BASE_ROW = 15
 
+# Frames without valid data after which the display is disabled (CTA-608-E C.21)
+NO_VALID_DATA_FRAMES = 45
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -98,6 +101,10 @@ class SccContext:
 
     # Text alignment
     self.text_alignment = TextAlignment.AUTO if config is None else config.text_align
+
+    # Whether the parity of the words is checked, and the number of consecutive words without odd parity
+    self.check_parity = True if config is None else config.check_parity
+    self.invalid_words: int = 0
 
     self.new_buffered_caption()
 
@@ -167,6 +174,16 @@ class SccContext:
         self.count += 1
         previous_caption.set_id("caption" + str(self.count))
         self.div.push_child(previous_caption.to_paragraph(self.div.get_doc()))
+
+  def process_invalid_word(self, time_code: SmpteTimeCode):
+    """Processes a word that does not have odd parity: it is not valid data (CTA-608-E C.21, CEA-CEB-10-A 25.2.1)"""
+    self.invalid_words += 1
+    self.previous_word = None
+
+    if self.invalid_words == NO_VALID_DATA_FRAMES:
+      # After 45 frames without valid data the display is disabled and the memories are erased
+      self.push_active_caption_to_model(time_code)
+      self.new_buffered_caption()
 
   def backspace(self, time_code: SmpteTimeCode):
     """Move the cursors in a column to the left"""

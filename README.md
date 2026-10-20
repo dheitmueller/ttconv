@@ -263,6 +263,15 @@ text alignment.
 
 Default: `"auto"`
 
+#### check_parity
+
+`"check_parity" : true | false`
+
+If `true`, words that do not have odd parity are not valid data: they are ignored, and 45 consecutive frames without valid
+data erase the displayed caption and the memories (CTA-608-E C.21).
+
+Default: `true`
+
 ### SCC Writer configuration
 
 #### allow_reflow

@@ -95,6 +95,13 @@ class SccReaderConfiguration(ModuleConfiguration):
     metadata={"decoder": TextAlignment.from_value}
   )
 
+  # Whether words that do not have odd parity are ignored, and the captions are erased after 45 consecutive frames
+  # without valid data (CTA-608-E C.21)
+  check_parity: bool = field(
+    default=True,
+    metadata={"decoder": bool}
+  )
+
   @classmethod
   def name(cls):
     return "scc_reader"

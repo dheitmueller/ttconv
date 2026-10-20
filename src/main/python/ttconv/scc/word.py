@@ -44,9 +44,11 @@ PARITY_BIT_MASK = 0b01111111
 class SccWord:
   """SCC hexadecimal word definition"""
 
-  def __init__(self, byte_1: int, byte_2: int):
+  def __init__(self, byte_1: int, byte_2: int, valid_parity: bool = True):
     self.byte_1 = byte_1
     self.byte_2 = byte_2
+    # Whether both bytes had odd parity when they were read (the parity bit is not part of byte_1 and byte_2)
+    self.valid_parity = valid_parity
     self.value = byte_1 * 0x100 + byte_2
     self.code: Optional[SccCode | SccPreambleAddressCode] = self._find_code()
 
@@ -79,10 +81,11 @@ class SccWord:
     """Creates a SCC word from the specified bytes"""
     if byte_1 > 0xFF or byte_2 > 0xFF:
       raise ValueError(f"Expected two 1-byte int values, instead got {hex(byte_1)} and {hex(byte_2)}")
+    valid_parity = bin(byte_1).count("1") % 2 == 1 and bin(byte_2).count("1") % 2 == 1
     byte_1 = SccWord._decipher_parity_bit(byte_1)
     byte_2 = SccWord._decipher_parity_bit(byte_2)
 
-    return SccWord(byte_1, byte_2)
+    return SccWord(byte_1, byte_2, valid_parity)
 
   @staticmethod
   def from_str(hex_word: str) -> SccWord:

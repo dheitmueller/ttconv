@@ -123,6 +123,13 @@ class SccLine:
         self.time_code.add_frames()
       first = False
 
+      if context.check_parity:
+        if not scc_word.valid_parity:
+          context.process_invalid_word(self.time_code)
+          continue
+
+        context.invalid_words = 0
+
       offset = self.time_code.to_temporal_offset()
 
       # A control code is redundant only if it repeats the control code received in the immediately
