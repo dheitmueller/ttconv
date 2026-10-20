@@ -187,9 +187,16 @@ class _Chunk:
     
     scc_bytes = unicode_to_scc(char)
 
-    if len(scc_bytes) > 1 and len(self._octet_buffer) % 2 == 1:
+    if len(scc_bytes) == 3:
+      # A fallback character and an extended character: the fallback is the second octet of a pair, so that the code of the
+      # extended character starts a pair
+      self._octet_buffer.append(scc_bytes[0])
+      if len(self._octet_buffer) % 2 == 1:
+        self._octet_buffer.append(0)
+      scc_bytes = scc_bytes[1:]
+    elif len(scc_bytes) > 1 and len(self._octet_buffer) % 2 == 1:
       self._octet_buffer.append(0)
-    
+
     for b in scc_bytes:
       self._octet_buffer.append(b)
 

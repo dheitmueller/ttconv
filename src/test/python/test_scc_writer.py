@@ -199,6 +199,35 @@ class SCCWriterTest(unittest.TestCase):
 
 00:00:05;00	942c 942c"""
 
+  def test_extended_characters(self):
+    # CTA-608-E 6.4.2: an extended character is sent after a fallback character of the basic set, which a decoder that has
+    # the extended sets replaces. The fallback is the letter without its accent, or the one that stands for the symbol.
+    ttml_doc_str = """<?xml version="1.0" encoding="UTF-8"?>
+<tt xml:lang="en" xmlns="http://www.w3.org/ns/ttml"
+    xmlns:ttp="http://www.w3.org/ns/ttml#parameter"
+    ttp:frameRate="30" ttp:frameRateMultiplier="1000 1001">
+  <body>
+    <div>
+      <p begin="30f" end="90f">\u00c1\u00e9 \u00a1S\u00ed! \u00df \u2014 \u2502 \u201cA\u201d</p>
+     </div>
+  </body>
+</tt>"""
+
+    model = imsc_reader.to_model(et.ElementTree(et.fromstring(ttml_doc_str)))
+    scc_from_model = scc_writer.from_model(model, SccWriterConfiguration())
+
+    expected_scc = """Scenarist_SCC V1.0
+
+00:00:00;07	9420 9420 94ae 94ae 9440 9440 c180 9220 dc20 a180 92a7 d35e a120 7380 1334 20ad 922a 20ec 1337 20a2 92ae c1a2 922f 942f 942f
+
+00:00:03;00	942c 942c"""
+    self.assertEqual(expected_scc, scc_from_model)
+
+    # what a decoder that has the extended sets displays
+    doc = scc_reader.to_model(scc_from_model)
+    text = "".join(list(span)[0].get_text() for span in list(list(doc.get_body())[0])[0] if isinstance(span, Span))
+    self.assertEqual("\u00c1\u00e9 \u00a1S\u00ed! \u00df \u2014 \u2502 \u201cA\u201d", text)
+
   def test_pop_on_centered(self):
     ttml_doc_str = """<?xml version="1.0" encoding="UTF-8"?>
 <tt xml:lang="en" xmlns="http://www.w3.org/ns/ttml"

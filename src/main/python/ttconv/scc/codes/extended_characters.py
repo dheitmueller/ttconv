@@ -120,6 +120,14 @@ class SccExtendedCharacter(SccCode):
     return self._unicode
 
   @staticmethod
+  def from_unicode(c: str) -> typing.Optional[SccExtendedCharacter]:
+    """Find the extended character corresponding to the Unicode character"""
+    for ext_char in list(SccExtendedCharacter):
+      if ext_char.get_unicode_value() == c:
+        return ext_char
+    return None
+
+  @staticmethod
   def find(value: int) -> typing.Optional[SccExtendedCharacter]:
     """Find the special character corresponding to the specified value"""
     for spec_char in list(SccExtendedCharacter):
