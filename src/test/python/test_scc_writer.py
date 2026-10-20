@@ -47,7 +47,7 @@ import ttconv.srt.reader as srt_reader
 
 from ttconv.scc.config import SCCFrameRate, SccWriterConfiguration
 from ttconv.model import ContentDocument, Region, Body, Div, P, Span, Text, ContentElement
-from ttconv.style_properties import StyleProperties, DisplayType
+from ttconv.style_properties import StyleProperties, DisplayType, NamedColors, FontStyleType
 
 class SccWriterConfigurationTest(unittest.TestCase):
 
@@ -227,6 +227,40 @@ class SCCWriterTest(unittest.TestCase):
     doc = scc_reader.to_model(scc_from_model)
     text = "".join(list(span)[0].get_text() for span in list(list(doc.get_body())[0])[0] if isinstance(span, Span))
     self.assertEqual("\u00c1\u00e9 \u00a1S\u00ed! \u00df \u2014 \u2502 \u201cA\u201d", text)
+
+  def test_colors_underline_and_italics(self):
+    # CTA-608-E 6.2: the PAC of a row sets the color or italics and the underline of its first character, a mid-row code
+    # sets them where they change; the code is displayed as a space and replaces the space between the words
+    ttml_doc_str = """<?xml version="1.0" encoding="UTF-8"?>
+<tt xml:lang="en" xmlns="http://www.w3.org/ns/ttml"
+    xmlns:tts="http://www.w3.org/ns/ttml#styling"
+    xmlns:ttp="http://www.w3.org/ns/ttml#parameter"
+    ttp:frameRate="30" ttp:frameRateMultiplier="1000 1001">
+  <body>
+    <div>
+      <p begin="30f" end="90f"><span tts:color="#00ff00">Green</span> <span tts:color="#ff0000" tts:textDecoration="underline">red under</span> <span tts:fontStyle="italic">italic</span></p>
+     </div>
+  </body>
+</tt>"""
+
+    expected_scc = """Scenarist_SCC V1.0
+
+00:00:00;09	9420 9420 94ae 94ae 94c2 94c2 c7f2 e5e5 6e80 9129 9129 f2e5 6420 756e 64e5 f280 91ae 91ae e9f4 61ec e9e3 942f 942f
+
+00:00:03;00	942c 942c"""
+
+    model = imsc_reader.to_model(et.ElementTree(et.fromstring(ttml_doc_str)))
+    scc_from_model = scc_writer.from_model(model, SccWriterConfiguration())
+    self.assertEqual(expected_scc, scc_from_model)
+
+    # what a decoder shows
+    doc = scc_reader.to_model(scc_from_model)
+    spans = [(list(span)[0].get_text(), span.get_style(StyleProperties.Color), span.get_style(StyleProperties.TextDecoration),
+              span.get_style(StyleProperties.FontStyle)) for span in list(list(doc.get_body())[0])[0] if isinstance(span, Span)]
+    self.assertEqual(["Green ", "red under", " italic"], [span[0] for span in spans])
+    self.assertEqual(NamedColors.green.value, spans[0][1])
+    self.assertEqual((NamedColors.red.value, True), (spans[1][1], spans[1][2].underline))
+    self.assertEqual(FontStyleType.italic, spans[2][3])
 
   def test_pop_on_centered(self):
     ttml_doc_str = """<?xml version="1.0" encoding="UTF-8"?>

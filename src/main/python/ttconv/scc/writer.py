@@ -38,11 +38,46 @@ from ttconv.isd import ISD
 from ttconv.scc.codes.characters import unicode_to_scc
 from ttconv.scc.codes.preambles_address_codes import SccPreambleAddressCode
 from ttconv.scc.config import SccWriterConfiguration
-from ttconv.style_properties import StyleProperties, NamedColors, TextAlignType
+from ttconv.style_properties import StyleProperties, NamedColors, TextAlignType, FontStyleType, ColorType
 from ttconv.scc.codes.control_codes import SccControlCode
+from ttconv.scc.codes.mid_row_codes import SccMidRowCode
 from ttconv.time_code import FPS_29_97, FPS_30, SmpteTimeCode
 
 LOGGER = logging.getLogger(__name__)
+
+# The foreground colors of CEA-608 (CTA-608-E 6.2), in the order of the mid-row codes
+_COLORS = [NamedColors.white, NamedColors.green, NamedColors.blue, NamedColors.cyan, NamedColors.red, NamedColors.yellow,
+           NamedColors.magenta]
+_RGB_COLORS = [(255, 255, 255), (0, 255, 0), (0, 0, 255), (0, 255, 255), (255, 0, 0), (255, 255, 0), (255, 0, 255)]
+
+# (color index, italic, underline) of a character; italics are white italics in CEA-608
+_DEFAULT_STYLE = (0, False, False)
+
+def _closest_color_index(color: Optional[ColorType]) -> int:
+  """Returns the index in _COLORS of the CEA-608 color that is the closest to the color"""
+  if color is None:
+    return 0
+  rgb = color.components[:3]
+  return min(range(len(_RGB_COLORS)), key=lambda i: sum((a - b) ** 2 for a, b in zip(rgb, _RGB_COLORS[i])))
+
+def _style_of(element: model.Span) -> tuple:
+  """Returns the CEA-608 style (color index, italic, underline) of the content of an element"""
+  color = _closest_color_index(element.get_style(StyleProperties.Color))
+  italic = element.get_style(StyleProperties.FontStyle) in (FontStyleType.italic, FontStyleType.oblique)
+  decoration = element.get_style(StyleProperties.TextDecoration)
+  underline = bool(decoration is not None and decoration.underline)
+
+  if italic and color != 0:
+    # italics are white in CEA-608: the color wins
+    italic = False
+
+  return (color, italic, underline)
+
+def _mid_row_code(style: tuple) -> int:
+  """Returns the mid-row code (channel 1) that sets the style"""
+  color, italic, underline = style
+  base = 0x112E if italic else 0x1120 + 2 * color
+  return base + (1 if underline else 0)
 
 class _Caption:
   """Collection of lines of text with a begin and end time and an alignment"""
@@ -51,6 +86,7 @@ class _Caption:
     self._begin: Fraction = 0
     self._end: Optional[Fraction] = None
     self._lines: List[str] = []
+    self._styles: List[List[tuple]] = []  # the style of every character of every line
     self._alignment: TextAlignType = TextAlignType.start
 
   def set_begin(self, begin: Fraction):
@@ -78,8 +114,13 @@ class _Caption:
     return self._alignment
 
   def set_lines(self, lines: List[str]):
-    """Sets the lines of text"""
+    """Sets the lines of text (without styles)"""
     self._lines = lines
+    self._styles = [[_DEFAULT_STYLE] * len(line) for line in lines]
+
+  def get_styles(self, index: int) -> List[tuple]:
+    """Returns the style of every character of a line"""
+    return self._styles[index]
 
   def __len__(self):
     return len(self._lines)
@@ -95,29 +136,36 @@ class _Caption:
 
   def append(self, line: str):
     self._lines.append(line)
+    self._styles.append([_DEFAULT_STYLE] * len(line))
+
+  def append_text(self, text: str, style: tuple):
+    """Appends text with a style to the last line"""
+    self._lines[-1] = self._lines[-1] + text
+    self._styles[-1] = self._styles[-1] + [style] * len(text)
 
   @staticmethod
   def from_regions(regions: Sequence[model.Region]) -> _Caption:
     """Returns the list of lines that are flowed into the Region"""
     _lines: _Caption = _Caption()
 
-    def _process_element(element: model.ContentElement):
+    def _process_element(element: model.ContentElement, style: tuple = _DEFAULT_STYLE):
 
       if isinstance(element, model.Div):
         for elem in element:
-          _process_element(elem)
+          _process_element(elem, style)
         return
 
       if isinstance(element, model.P):
         _lines.append("")
         _lines.set_alignment(element.get_style(StyleProperties.TextAlign))
         for elem in element:
-          _process_element(elem)
+          _process_element(elem, style)
         return
 
       if isinstance(element, model.Span):
+        span_style = _style_of(element)
         for elem in element:
-          _process_element(elem)
+          _process_element(elem, span_style)
         return
 
       if isinstance(element, model.Br):
@@ -125,7 +173,7 @@ class _Caption:
         return
 
       if isinstance(element, model.Text):
-        _lines[-1] = _lines[-1] + element.get_text()
+        _lines.append_text(element.get_text(), style)
         return
 
     for region in regions:
@@ -241,6 +289,53 @@ class _Chunk:
 
 MAX_LINEWIDTH = 32
 
+def _push_chars(chunk: _Chunk, text: str, styles: List[tuple], previous_style: tuple):
+  """Pushes characters, with the mid-row codes that change the style. A mid-row code is displayed as a space and takes a
+  column: it replaces the space where the style changes (the space that precedes the characters of the new style or the
+  first space of them), otherwise it is an additional column"""
+  for i, (c, style) in enumerate(zip(text, styles)):
+    if c == " " and i + 1 < len(text) and styles[i + 1] != style and styles[i + 1] != previous_style:
+      # the cell of this space is the mid-row code of the style that follows
+      chunk.push_control_code(_mid_row_code(styles[i + 1]))
+      previous_style = styles[i + 1]
+      continue
+
+    if style != previous_style:
+      chunk.push_control_code(_mid_row_code(style))
+      previous_style = style
+      if c == " ":
+        continue
+
+    chunk.push_char(c)
+
+def _push_line(chunk: _Chunk, row: int, indent: Optional[int], spaces: int, text: str, styles: List[tuple]):
+  """Pushes a PAC for the row, the spaces that move the first character to its column, and the text with its styles"""
+  style = styles[0] if len(text) > 0 else _DEFAULT_STYLE
+  column = (indent or 0) + spaces
+
+  if style == _DEFAULT_STYLE:
+    pac = SccPreambleAddressCode(1, row, NamedColors.white.value, indent, False, False)
+    chunk.push_control_code(pac.get_ch1_packet())
+    for _ in range(spaces):
+      chunk.push_char(" ")
+
+  elif column == 0:
+    # the PACs without an indent have a color, italics and underline
+    color, italic, underline = style
+    pac = SccPreambleAddressCode(1, row, _COLORS[color].value, None, italic, underline)
+    chunk.push_control_code(pac.get_ch1_packet())
+
+  else:
+    # a mid-row code, that takes the column before the first character, sets the style
+    base = 4 * ((column - 1) // 4)
+    pac = SccPreambleAddressCode(1, row, NamedColors.white.value, base, False, False)
+    chunk.push_control_code(pac.get_ch1_packet())
+    for _ in range(column - 1 - base):
+      chunk.push_char(" ")
+    chunk.push_control_code(_mid_row_code(style))
+
+  _push_chars(chunk, text, styles, style)
+
 class _RollupKind(Enum):
   START = 0
   ROLL_UP = 1
@@ -288,13 +383,16 @@ def _process_as_rollup(captions, config, progress_callback) -> List[_Chunk]:
 
     if kind is _RollupKind.PAINT_ON:
       ru_chunk.set_begin(begin_f)
-      for c in caption[-1][len(captions[i - 1][-1]):]:
-        ru_chunk.push_char(c)
+      shown = len(captions[i - 1][-1])
+      previous_style = caption.get_styles(-1)[shown - 1] if shown > 0 else _DEFAULT_STYLE
+      _push_chars(ru_chunk, caption[-1][shown:], caption.get_styles(-1)[shown:], previous_style)
     else:
       # determine the first line to be emitted
       first_line_index = 0 if kind is _RollupKind.START else -1
 
-      for line in caption[first_line_index:]:
+      first_line = first_line_index % len(caption)
+      for line_index in range(first_line, len(caption)):
+        line = caption[line_index]
 
         if config.rollup_lines == 2:
           ru_chunk.push_control_code(SccControlCode.RU2.get_ch1_value())
@@ -306,11 +404,11 @@ def _process_as_rollup(captions, config, progress_callback) -> List[_Chunk]:
         # the caption begins when the CR code is received
         begin_f = begin_f - ru_chunk.get_dur()
         ru_chunk.push_control_code(SccControlCode.CR.get_ch1_value())
-        pac = SccPreambleAddressCode(1, 15, NamedColors.white, 0, False, False)
-        ru_chunk.push_control_code(pac.get_ch1_packet())
-
-        for c in line:
-          ru_chunk.push_char(c)
+        # The base row of the roll-up caption is always row 15 (CTA-608-E C.15), which is also what the TeleCaption I and II
+        # decoders display whatever the row of the PAC (B.5).
+        # TODO: a movable base row, or a caption on rows 5-11, needs PACs that TeleCaption decoders do not recognize. If you
+        # care about these decoders, see the alternate-row scheme for mid-screen PACs (CTA-608-E B.2.2). Patches welcome.
+        _push_line(ru_chunk, 15, 0, 0, line, caption.get_styles(line_index))
 
         if len(chunks) > 0 and begin_f < chunks[-1].get_end():
           begin_f = chunks[-1].get_end()
@@ -340,7 +438,11 @@ def _process_as_popon(captions, config, progress_callback) -> List[_Chunk]:
 
     enm_chunk.push_control_code(SccControlCode.RCL.get_ch1_value())
     enm_chunk.push_control_code(SccControlCode.ENM.get_ch1_value())
-    for line_num, line in enumerate(caption, 15 - len(caption)):
+    # The rows of the caption are the bottom rows of the screen, so no PAC is for the mid-screen rows 5-11 that the
+    # TeleCaption I and II decoders do not recognize (CTA-608-E B.2) as long as a caption has at most 4 rows.
+    # TODO: positioning a caption on the mid-screen rows would need the alternate-row scheme for mid-screen PACs
+    # (CTA-608-E B.2.2) to stay readable on these decoders. Patches welcome.
+    for index, (line_num, line) in enumerate(enumerate(caption, 15 - len(caption))):
       if caption.get_alignment() == TextAlignType.center:
         indent = (32 - len(line)) // 2
       elif caption.get_alignment() == TextAlignType.end:
@@ -351,13 +453,7 @@ def _process_as_popon(captions, config, progress_callback) -> List[_Chunk]:
       spaces = indent % 4 if indent is not None else 0
       indent = 4 * (indent // 4) if indent is not None else None
 
-      pac = SccPreambleAddressCode(1, line_num, NamedColors.white, indent, False, False)
-      enm_chunk.push_control_code(pac.get_ch1_packet())
-
-      for i in range(spaces):
-        enm_chunk.push_char(" ")
-      for c in line:
-        enm_chunk.push_char(c)
+      _push_line(enm_chunk, line_num, indent, spaces, line, caption.get_styles(index))
     enm_chunk.push_control_code(SccControlCode.EOC.get_ch1_value())
 
     enm_chunk.set_begin(int(caption.get_begin() * config.frame_rate.fps - enm_chunk.get_dur() + 2))
