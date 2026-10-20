@@ -1743,5 +1743,21 @@ Scenarist_SCC V1.0
     self.assertEqual([" AB"], ["".join(list(span)[0].get_text() for span in [s]) for s in spans])
     self.assertEqual(NamedColors.red.value, spans[0].get_style(StyleProperties.BackgroundColor))
 
+  def test_scc_flash_on_occupies_a_cell(self):
+    # CTA-608-E C.19: the FON code occupies a cell, shown as a space, so "Ab" FON "Cd" has two characters
+    # between the b and the C
+    scc_content = """\
+Scenarist_SCC V1.0
+
+00:00:00:00	9420 9420 94ae 94ae 1540 1540 c162 2080 1428 1428 4364 942f 942f
+"""
+
+    doc = to_model(scc_content)
+
+    p_list = list(list(doc.get_body())[0])
+    self.assertEqual(1, len(p_list))
+    text = "".join(list(span)[0].get_text() for span in p_list[0] if isinstance(span, Span))
+    self.assertEqual("Ab  Cd", text)
+
 if __name__ == '__main__':
   unittest.main()
